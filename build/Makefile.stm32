@@ -1,0 +1,129 @@
+# =============================================================================
+#  Makefile.stm32 - RoboControl V1.0 固件构建（STM32F4 + FreeRTOS）
+#
+#  用法：
+#      make -f build/Makefile.stm32            # 构建 build/stm32/robocontrol.elf
+#      make -f build/Makefile.stm32 flash      # 用 st-flash 烧录
+#      make -f build/Makefile.stm32 clean
+#
+#  【验证状态】未在当前环境构建验证：本机没有 arm-none-eabi 工具链，
+#  也没有 STM32 HAL / CMSIS / FreeRTOS-Kernel 源码。本文件是"预留 Hardware Mode"
+#  的构建入口，必须先在真实工程里跑通一次（见 docs/BUILD_STM32.md）。
+#
+#  依赖目录（可用环境变量覆盖）：
+#      FREERTOS_DIR  FreeRTOS-Kernel 根目录
+#      HAL_DIR       STM32CubeF4 的 Drivers 目录（含 STM32F4xx_HAL_Driver 与 CMSIS）
+#      LDSCRIPT      链接脚本
+# =============================================================================
+
+TARGET   := robocontrol
+BUILD    := build/stm32
+
+# ---------------------------------------------------------------- 工具链
+PREFIX   := arm-none-eabi-
+CC       := $(PREFIX)gcc
+AS       := $(PREFIX)gcc -x assembler-with-cpp
+CP       := $(PREFIX)objcopy
+SZ       := $(PREFIX)size
+HEX      := $(CP) -O ihex
+BIN      := $(CP) -O binary -S
+
+# ---------------------------------------------------------------- 目标芯片
+# TODO(移植)：按实际芯片改 -mcpu / 链接脚本 / 宏定义
+CPU      := -mcpu=cortex-m4
+FPU      := -mfpu=fpv4-sp-d16
+FLOAT_ABI:= -mfloat-abi=hard
+MCU      := $(CPU) -mthumb $(FPU) $(FLOAT_ABI)
+
+DEFS     := -DUSE_HAL_DRIVER -DSTM32F407xx
+INCS     := \
+    -ICommon -IControl -ISimulation -IService \
+    -IRTOS -IRTOS/port_freertos -IBSP -IApplication -ICore \
+    -I$(HAL_DIR)/STM32F4xx_HAL_Driver/Inc \
+    -I$(HAL_DIR)/CMSIS/Device/ST/STM32F4xx/Include \
+    -I$(HAL_DIR)/CMSIS/Include \
+    -I$(FREERTOS_DIR)/include \
+    -I$(FREERTOS_DIR)/portable/GCC/ARM_CM4F
+
+# -O2 + -ffunction-sections/-fdata-sections + --gc-sections：
+# 嵌入式固件体积的常规优化组合；不要用 -ffast-math（会破坏 RC_IsFinite 的语义）。
+OPT      := -O2 -g3 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
+LDFLAGS  := $(MCU) -T$(LDSCRIPT) --specs=nano.specs --specs=nosys.specs \
+            -Wl,-Map=$(BUILD)/$(TARGET).map,--cref -Wl,--gc-sections -lc -lm
+ASFLAGS  := $(MCU) -g
+
+# ---------------------------------------------------------------- 源文件
+# 产品源码与主机仿真构建共用同一份文件 —— 这正是分层架构的收益。
+APP_SRC := \
+    Control/pid.c \
+    Simulation/virtual_motor.c \
+    Service/motor_manager.c \
+    Service/command_service.c \
+    Service/monitor_service.c \
+    RTOS/task_control.c \
+    RTOS/task_motor.c \
+    RTOS/task_command.c \
+    RTOS/task_monitor.c \
+    RTOS/task_debug.c \
+    RTOS/port_freertos/port_freertos.c \
+    BSP/bsp_uart_stm32.c \
+    Application/app.c \
+    Core/main_stm32.c
+
+KERNEL_SRC := \
+    $(FREERTOS_DIR)/tasks.c \
+    $(FREERTOS_DIR)/queue.c \
+    $(FREERTOS_DIR)/list.c \
+    $(FREERTOS_DIR)/timers.c \
+    $(FREERTOS_DIR)/portable/MemMang/heap_4.c \
+    $(FREERTOS_DIR)/portable/GCC/ARM_CM4F/port.c
+
+HAL_SRC := \
+    $(HAL_DIR)/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.c \
+    $(HAL_DIR)/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.c \
+    $(HAL_DIR)/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.c \
+    $(HAL_DIR)/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.c \
+    $(HAL_DIR)/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c \
+    $(HAL_DIR)/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma.c
+
+# TODO(移植)：startup 汇编与 stm32f4xx_it.c 由 CubeMX 生成，路径按实际工程改
+STARTUP  := Core/startup_stm32f407xx.s
+IT_SRC   := Core/stm32f4xx_it.c Core/system_stm32f4xx.c
+
+C_SRC    := $(APP_SRC) $(KERNEL_SRC) $(HAL_SRC) $(IT_SRC)
+OBJS     := $(addprefix $(BUILD)/,$(notdir $(C_SRC:.c=.o)))
+OBJS     += $(BUILD)/$(notdir $(STARTUP:.s=.o))
+vpath %.c $(sort $(dir $(C_SRC)))
+vpath %.s $(sort $(dir $(STARTUP)))
+
+# ---------------------------------------------------------------- 规则
+.PHONY: all clean flash size
+
+all: $(BUILD)/$(TARGET).elf $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin size
+
+$(BUILD)/%.o: %.c | $(BUILD)
+	$(CC) -c $(MCU) $(DEFS) $(INCS) $(OPT) $< -o $@
+
+$(BUILD)/%.o: %.s | $(BUILD)
+	$(AS) -c $(ASFLAGS) $< -o $@
+
+$(BUILD)/$(TARGET).elf: $(OBJS)
+	$(CC) $(OBJS) $(LDFLAGS) -o $@
+
+$(BUILD)/$(TARGET).hex: $(BUILD)/$(TARGET).elf
+	$(HEX) $< $@
+
+$(BUILD)/$(TARGET).bin: $(BUILD)/$(TARGET).elf
+	$(BIN) $< $@
+
+$(BUILD):
+	mkdir -p $(BUILD)
+
+size: $(BUILD)/$(TARGET).elf
+	$(SZ) $<
+
+flash: $(BUILD)/$(TARGET).bin
+	st-flash write $< 0x8000000
+
+clean:
+	rm -rf $(BUILD)

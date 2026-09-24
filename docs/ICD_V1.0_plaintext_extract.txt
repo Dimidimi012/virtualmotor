@@ -1,0 +1,138 @@
+RoboControl V1.0 软件接口定义 ICD V1.0
+Interface Control Document｜STM32F4 + FreeRTOS + PID + Virtual Motor
+0. 文档目的
+本 ICD 是 RoboControl V1.0 的“接口宪法”。它的目标不是解释每一行代码，而是在多人或多 AI Agent 协作前锁定模块边界、数据结构、状态机、API、任务通信和并发规则。任何模块代码都不得擅自改变本 ICD 已冻结的公共接口。
+版本目标：V1.0 一周内可完成、可编译、可仿真、可展示。
+平台目标：STM32F4 + HAL/CMSIS + FreeRTOS。
+运行模式：默认 Simulation Mode；预留 Hardware Mode。
+核心原则：单一数据所有权、消息传递优先、模块 API 优先、实时任务不被调试阻塞。
+1. 系统边界与最终闭环
+UART Command    ↓Command Task    ↓ CommandQueueControl Task ──→ PID ──→ MotorManager    ↑                           ↓    │                      Motor CommandMotor Feedback ←── Motor Task ← Virtual Motor    ↓Monitor / Debug
+关键冻结决定：Control Task 是唯一 PID 执行者；Motor Task 是唯一电机模型更新者；Command Task 不直接修改 PID 内部变量；Debug Task 不参与控制；Monitor Task 不直接计算控制输出。
+2. 模块职责矩阵
+Common
+公共类型、配置、错误码、运行模式。禁止放业务逻辑。
+Control/PID
+只负责控制算法状态与计算，不知道 UART、FreeRTOS 或具体电机硬件。
+Simulation/VirtualMotor
+只负责电机动力学模拟与反馈生成。
+Service/MotorManager
+维护统一电机对象和状态机，对上提供电机 API。
+Service/CommandService
+命令解析、命令合法性检查、发送消息。
+Service/MonitorService
+健康检查、超时和异常判断。
+RTOS Tasks
+调度模块 API，不实现重复业务逻辑。
+BSP
+UART、Timer 等板级接口。
+Driver
+未来真实电机驱动适配层。
+Application
+系统级流程和启动逻辑。
+3. 全局公共类型（冻结）
+// common/types.htypedef enum {    RC_OK = 0,    RC_ERROR,    RC_INVALID_PARAM,    RC_TIMEOUT,    RC_BUSY} RC_Result;typedef enum {    RC_MODE_SIMULATION = 0,    RC_MODE_HARDWARE} RC_RunMode;typedef enum {    MOTOR_INIT = 0,    MOTOR_READY,    MOTOR_RUNNING,    MOTOR_STOPPED,    MOTOR_ERROR} MotorState;typedef enum {    CMD_NONE = 0,    CMD_START,    CMD_STOP,    CMD_SET_SPEED,    CMD_RESET,    CMD_STATUS} CommandType;
+禁止各模块自行定义另一套 MotorState 或 CommandType。公共枚举只能由 Common 模块统一维护。
+4. MotorData 数据所有权
+typedef struct {    float target_speed;    float actual_speed;    float position;    float control_output;    MotorState state;    uint32_t update_tick;} MotorData;
+所有权规则：MotorManager 拥有 MotorData 的唯一存储。其他模块不得保存并长期修改 MotorData 指针。Control Task 通过快照读取反馈，并通过 API 提交控制输出。Motor Task 通过 API 更新反馈。
+target_speed：目标速度，Control 读取。
+actual_speed：实际速度反馈。
+position：虚拟或真实编码器位置。
+control_output：PID 输出。
+state：电机状态。
+update_tick：最近一次反馈更新时间。
+5. Command Message（Queue 冻结格式）
+typedef struct {    CommandType type;    float value;    uint32_t timestamp;} CommandMessage;
+V1.0 CommandQueue 只传递值，不传递裸指针。原因：FreeRTOS Queue 会复制数据，值传递可以避免生命周期错误。
+6. PID 接口定义
+typedef struct {    float kp;    float ki;    float kd;    float integral;    float last_error;    float output_limit;    float integral_limit;} PIDController;void PID_Init(PIDController *pid,              float kp, float ki, float kd,              float output_limit,              float integral_limit);float PID_Update(PIDController *pid,                 float target,                 float actual,                 float dt);void PID_Reset(PIDController *pid);
+PID_Update 的控制权：只允许 Control Task 调用。PIDController 不暴露给 Command、Debug、Monitor 修改。参数调节 V1.0 仅在初始化阶段完成，运行中在线调参属于后续版本。
+7. PID V1.0 算法冻结规则
+error = target - actualintegral += error * dtderivative = (error - last_error) / dtoutput = kp*error + ki*integral + kd*derivativeintegral = clamp(integral, -integral_limit, integral_limit)output   = clamp(output, -output_limit, output_limit)last_error = error
+若 dt <= 0，PID_Update 必须安全返回并避免除零。V1.0 默认控制周期 10ms，因此 dt = 0.01f，但代码接口仍保留 dt 参数，避免未来任务周期变化导致算法隐式错误。
+8. Virtual Motor 接口定义
+typedef struct {    float speed;    float position;    float input;    float motor_gain;    float damping;    float load;} VirtualMotor;void VirtualMotor_Init(VirtualMotor *motor);void VirtualMotor_SetInput(VirtualMotor *motor, float input);void VirtualMotor_SetLoad(VirtualMotor *motor, float load);void VirtualMotor_Update(VirtualMotor *motor, float dt);float VirtualMotor_GetSpeed(const VirtualMotor *motor);float VirtualMotor_GetPosition(const VirtualMotor *motor);
+acceleration = motor_gain * input             - damping * speed             - loadspeed += acceleration * dtposition += speed * dt
+V1.0 模型明确是“演示级一阶简化动力学模型”，不是完整电机电磁模型。展示时应主动说明这一点，这反而体现工程边界意识。
+9. MotorManager API（核心冻结接口）
+void MotorManager_Init(void);RC_Result MotorManager_SetTargetSpeed(float speed);float MotorManager_GetTargetSpeed(void);RC_Result MotorManager_SetControlOutput(float output);float MotorManager_GetControlOutput(void);void MotorManager_UpdateFeedback(float speed,                                 float position);float MotorManager_GetActualSpeed(void);float MotorManager_GetPosition(void);MotorState MotorManager_GetState(void);RC_Result MotorManager_SetState(MotorState next);MotorData MotorManager_GetSnapshot(void);void MotorManager_StopOutput(void);
+GetSnapshot 返回值拷贝，而不是返回可修改的全局指针。这样可以降低多任务共享数据误用风险。
+10. 状态机转换表（冻结）
+当前状态       允许转换INIT       → READY, ERRORREADY      → RUNNING, STOPPED, ERRORRUNNING    → STOPPED, ERRORSTOPPED    → RUNNING, READY, ERRORERROR      → INIT, READY（仅 RESET 后）
+禁止：RUNNING 直接跳 INIT；ERROR 直接 RUNNING；INIT 直接 RUNNING。非法转换返回 RC_INVALID_PARAM。
+11. Command Service API
+RC_Result CommandService_Parse(const char *text,                               CommandMessage *out);RC_Result CommandService_Send(const CommandMessage *msg);void CommandService_Handle(const CommandMessage *msg);
+职责分离：Parse 只解析；Send 只发送 Queue；Handle 只执行命令对应的系统操作。UART ISR 不允许执行复杂解析和 printf。ISR 只接收字节/通知任务。
+12. FreeRTOS 任务定义
+Task                Priority       Period------------------------------------------------ControlTask          High           10 msMotorTask            High           10 msCommandTask          Medium         Event-drivenMonitorTask          Low            100 msDebugTask            Low            500 ms
+建议初始优先级使用相对宏定义：TASK_PRIO_CONTROL、TASK_PRIO_MOTOR 等，而不是散落数字。具体数字由 RTOS 配置统一定义。
+13. ControlTask 精确职责
+循环：1. vTaskDelayUntil 保证 10ms 周期2. 非阻塞读取 CommandQueue3. 根据命令更新目标/状态4. 获取 MotorData Snapshot5. 如果 state != RUNNING：输出 06. 如果 RUNNING：PID_Update(target, actual, 0.01)7. MotorManager_SetControlOutput(output)8. 更新控制心跳
+ControlTask 不能：printf 大量日志、HAL_Delay、等待 UART、执行复杂字符串解析、直接修改 VirtualMotor 内部结构。
+14. MotorTask 精确职责
+循环：1. vTaskDelayUntil 保证 10ms2. 获取 control_output3. 获取当前 state4. RUNNING：VirtualMotor_SetInput5. STOPPED/ERROR：输入置 06. VirtualMotor_Update7. MotorManager_UpdateFeedback(speed, position)8. 更新电机心跳
+15. CommandTask 精确职责
+CommandTask 是唯一字符串命令入口。推荐 UART 命令：START、STOP、SET_SPEED 1000、RESET、STATUS。命令解析完成后构造 CommandMessage 并发送 CommandQueue。Queue 满时不得无限阻塞，应记录错误或丢弃非关键重复命令。
+16. MonitorTask 精确职责
+检查 Control 心跳是否超过阈值。
+检查 Motor 反馈 update_tick 是否过期。
+检查 RUNNING 状态下长期无速度响应。
+检查实际速度、输出是否 NaN/Inf 或超范围。
+严重错误：MotorManager_StopOutput → 状态转 ERROR。
+V1.0 不实现复杂故障树，先实现可解释的基础保护。
+17. DebugTask 精确职责
+建议输出：TGT=1000.0 ACT=932.5 OUT=42.8 POS=123.4 STATE=RUNNING
+DebugTask 是低优先级消费者。UART 发送必须避免长时间阻塞 ControlTask。若使用 DMA/IT 更好；V1.0 若使用简单阻塞发送，也必须仅在 DebugTask 中执行。
+18. 并发与数据竞争规则
+规则 1：PIDController 仅 ControlTask 访问，因此 V1.0 不需要 Mutex。
+规则 2：VirtualMotor 仅 MotorTask 写入。
+规则 3：CommandQueue 是跨任务主通信机制。
+规则 4：共享 MotorData 必须通过 MotorManager API。
+规则 5：若 MotorManager 同时被两个高频任务访问，V1.0 可采用短临界区复制快照，临界区中禁止调用阻塞 API。
+规则 6：禁止用 volatile 代替同步机制；volatile 不能解决原子性和竞争问题。
+规则 7：Debug 不得持有共享锁后执行 UART 输出。
+19. Queue 与未来扩展
+V1.0 只强制 CommandQueue。未来可增加 TelemetryQueue、FaultQueue、CANRxQueue，但本版本不提前实现，避免“架构过度设计”。
+20. 配置文件 config.h
+#define RC_CONTROL_PERIOD_MS      10U#define RC_MOTOR_PERIOD_MS        10U#define RC_MONITOR_PERIOD_MS      100U#define RC_DEBUG_PERIOD_MS        500U#define RC_DEFAULT_DT             0.01f#define RC_DEFAULT_OUTPUT_LIMIT   100.0f#define RC_DEFAULT_INTEGRAL_LIMIT 1000.0f#define RC_CMD_QUEUE_LENGTH       8U#define RC_MAX_TARGET_SPEED       3000.0f
+所有可调常量集中管理。禁止业务代码大量出现 10、100、0.01 等 Magic Number。
+21. 错误处理策略
+普通参数错误 → 返回 RC_INVALID_PARAMQueue 满         → 返回 RC_BUSY / 记录任务超时         → Monitor 标记故障反馈过期         → StopOutput + ERRORPID 非法 dt      → 安全退出非法状态转换     → RC_INVALID_PARAM
+V1.0 不使用大量 assert 作为运行时保护，因为嵌入式发布版本可能关闭 assert。关键安全路径必须有明确错误返回或状态处理。
+22. 启动顺序（冻结）
+main() ↓HAL / Clock Init ↓BSP Init ↓MotorManager_Init ↓PID_Init ↓VirtualMotor_Init ↓CommandQueue Create ↓Create Tasks ↓vTaskStartScheduler
+任何 Task 不得假设其他模块“可能已经初始化”。初始化顺序由 main/Application 统一负责。
+23. 文件依赖规则
+Control/PID        → CommonSimulation          → CommonMotorManager        → CommonCommandService      → Common + MotorManagerRTOS Tasks          → 对应 Service/Control APIApplication         → Service + RTOS Init禁止：PID → UARTPID → FreeRTOSVirtualMotor → UARTCommandService → VirtualMotor 内部数据DebugTask → PID 内部变量
+24. 推荐真实文件骨架
+RoboControl/├── Common/│   ├── types.h│   └── config.h├── Control/│   ├── pid.h│   └── pid.c├── Simulation/│   ├── virtual_motor.h│   └── virtual_motor.c├── Service/│   ├── motor_manager.h/.c│   ├── command_service.h/.c│   └── monitor_service.h/.c├── RTOS/│   ├── task_control.h/.c│   ├── task_motor.h/.c│   ├── task_command.h/.c│   ├── task_monitor.h/.c│   └── task_debug.h/.c├── BSP/│   └── bsp_uart.h/.c└── Core/    └── main.c
+25. Agent 开发边界
+Agent 1 只能修改架构和接口建议，修改冻结 API 必须提出 ICD 变更。Agent 2 负责 PID/VirtualMotor，不得自行引入 FreeRTOS。Agent 3 负责 RTOS/BSP，不得复制 PID。Agent 4 审查并提出补丁。Agent 5 只基于最终冻结架构生成展示材料。
+26. ICD 变更流程
+发现问题 ↓提出 Change Request ↓说明：接口 / 原因 / 影响模块 / 替代方案 ↓项目负责人确认 ↓更新 ICD 版本 ↓其他 Agent 同步
+不要让某个 Agent 悄悄改变 struct 字段名或 API 参数，否则多人协作最容易出现“每个模块都正确，但无法集成”。
+27. 第一版最小可运行验证
+启动系统后 state = READY。
+UART 输入 START → state = RUNNING。
+UART 输入 SET_SPEED 1000 → target_speed = 1000。
+ControlTask 每 10ms 运行 PID。
+MotorTask 每 10ms 更新 VirtualMotor。
+actual_speed 逐渐逼近 target_speed。
+Debug 每 500ms 输出曲线关键数据。
+输入 STOP → output = 0，state = STOPPED。
+RESET → PID_Reset + VirtualMotor 重置 + READY。
+故障注入：停止 Motor 更新 → Monitor 最终 ERROR。
+28. 集成顺序（强烈建议）
+阶段 A：普通 CPID 单元测试 + VirtualMotor 单元测试阶段 B：无 UART 的 FreeRTOSControlTask + MotorTask + DebugTask阶段 C：命令系统CommandQueue + START/STOP/SET_SPEED阶段 D：保护Monitor + Timeout + ERROR阶段 E：展示README + 架构图 + 测试数据 + 项目讲解
+这是最重要的工程决策之一：先验证控制闭环，再加通信；先跑最小系统，再堆功能。不要第一天就写完整工程。
+29. 项目答辩时的核心解释
+为什么 VirtualMotor：没有真实电机仍可验证控制闭环和软件架构。
+为什么 FreeRTOS：机器人控制包含周期控制、通信、监控、调试等并发需求。
+为什么 Queue：降低模块耦合，并提供明确的任务间消息边界。
+为什么 PID 与 MotorTask 分离：控制算法与对象模型职责不同，便于未来替换真实硬件。
+为什么 MotorManager：统一数据所有权，避免全局变量被多个任务随意修改。
+为什么 Monitor 独立：保护逻辑不能混入控制算法，否则难维护和测试。
+30. ICD V1.0 最终冻结结论
+RoboControl V1.0 的第一优先级不是“代码多”，而是“架构闭环”。完成本 ICD 后，项目已经具备清晰的工程骨架：输入命令 → 消息通信 → 实时控制 → 电机模型 → 反馈闭环 → 状态管理 → 故障监控 → 调试展示。
+下一步最合理的执行动作：先让 Agent 1 根据本 ICD 检查接口冲突；然后立即开始 Agent 2 的 PID + VirtualMotor 最小闭环代码。

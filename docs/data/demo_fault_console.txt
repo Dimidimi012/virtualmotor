@@ -1,0 +1,40 @@
+
+#############################################################
+#  RoboControl V1.0  |  host simulation demo
+#  mode = fault , duration = 8000 ms
+#############################################################
+#  scenario:
+#    t=   500 ms  =>  START
+#    t=  1000 ms  =>  SET_SPEED 1000
+#############################################################
+
+=== RoboControl V1.0 | mode=SIMULATION | boot OK ===
+commands: START | STOP | SET_SPEED <v> | RESET | STATUS
+# telemetry -> trace_fault.csv
+
+TGT=0.0 ACT=0.0 OUT=0.00 POS=0.0 STATE=READY FAULT=0x00000000
+TGT=0.0 ACT=0.0 OUT=0.00 POS=0.0 STATE=RUNNING FAULT=0x00000000
+TGT=1000.0 ACT=1031.3 OUT=18.38 POS=485.9 STATE=RUNNING FAULT=0x00000000
+TGT=1000.0 ACT=1000.8 OUT=19.96 POS=989.9 STATE=RUNNING FAULT=0x00000000
+TGT=1000.0 ACT=1000.0 OUT=20.00 POS=1490.0 STATE=RUNNING FAULT=0x00000000
+TGT=1000.0 ACT=1000.0 OUT=20.00 POS=1990.0 STATE=RUNNING FAULT=0x00000000
+TGT=1000.0 ACT=1000.0 OUT=20.00 POS=2490.0 STATE=RUNNING FAULT=0x00000000
+TGT=1000.0 ACT=1000.0 OUT=20.00 POS=2990.0 STATE=RUNNING FAULT=0x00000000
+[scenario] fault injected: motor feedback line cut
+TGT=1000.0 ACT=1000.0 OUT=0.00 POS=2990.0 STATE=ERROR FAULT=0x00000002
+TGT=1000.0 ACT=1000.0 OUT=0.00 POS=2990.0 STATE=ERROR FAULT=0x00000002
+TGT=1000.0 ACT=1000.0 OUT=0.00 POS=2990.0 STATE=ERROR FAULT=0x00000002
+TGT=1000.0 ACT=1000.0 OUT=0.00 POS=2990.0 STATE=ERROR FAULT=0x00000002
+TGT=1000.0 ACT=1000.0 OUT=0.00 POS=2990.0 STATE=ERROR FAULT=0x00000002
+TGT=1000.0 ACT=1000.0 OUT=0.00 POS=2990.0 STATE=ERROR FAULT=0x00000002
+TGT=1000.0 ACT=1000.0 OUT=0.00 POS=2990.0 STATE=ERROR FAULT=0x00000002
+
+#############################################################
+#  simulation finished at t = 8000 ms
+#  final state   : ERROR
+#  target / actual: 1000.00 / 1000.00
+#  control output : 0.00
+#  position       : 2990.00
+#  faults         : 0x00000002
+#  cmd rejected   : queue_full=0 parse_error=0
+#############################################################
